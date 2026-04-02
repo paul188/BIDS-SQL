@@ -1,0 +1,62 @@
+services:
+
+  # ── PostgreSQL metadata store ────────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: bids_sql_postgres
+    environment:
+      POSTGRES_DB:       ${METADATA_DB_NAME}
+      POSTGRES_USER:     ${METADATA_DB_USER}
+      POSTGRES_PASSWORD: ${METADATA_DB_PASSWORD}
+    volumes:
+      - postgres-bids-data:/var/lib/postgresql/data
+    ports:
+      - '${METADATA_DB_PORT:-5432}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${METADATA_DB_USER} -d ${METADATA_DB_NAME} -p 5432']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bids-sql-network
+
+  # ── BIDS-SQL CLI ─────────────────────────────────────────────────────────────
+  # Usage examples:
+  #
+  #   Index a local dataset folder and run bids-validator:
+  #     docker compose run --rm bids-sql /data
+  #
+  #   Index without validation (faster):
+  #     docker compose run --rm bids-sql /data --no-validate
+  #
+  #   Print the active discovery rules:
+  #     docker compose run --rm bids-sql --rules
+  #
+  # BIDS_DATA_PATH in .env should be the host path to your BIDS data root.
+  bids-sql:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: bids_sql_cli
+    env_file: .env
+    environment:
+      # Override DB host to the compose service name so the CLI container
+      # reaches postgres over the internal Docker network (not localhost).
+      METADATA_DB_HOST: postgres
+    volumes:
+      # Mount BIDS data read-only — the pipeline only reads files, never writes
+      - ${BIDS_DATA_PATH:-./data}:/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - bids-sql-network
+    # No `restart` — this is a one-shot CLI tool, not a daemon
+
+networks:
+  bids-sql-network:
+    driver: bridge
+
+volumes:
+  postgres-bids-data:

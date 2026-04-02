@@ -1,0 +1,22 @@
+# Database & ORM
+sqlalchemy>=2.0.0
+alembic          # For database migrations
+
+# Filesystem & Paths
+universal_pathlib>=0.2.0
+fsspec           # Required by universal_pathlib for cloud/remote support
+s3fs             # Optional: Add if you plan to use Amazon S3
+paramiko         # Optional: Add if you plan to use SFTP/SSH paths
+
+# Neuroimaging & Data Science
+nibabel          # For BIDSImageFile (NIfTI handling)
+pandas           # For BIDSDataFile (TSV/CSV handling)
+numpy
+
+# BIDS Specific
+bidsschematools  # To interact with official BIDS rules
+pybids           # For compatibility or as a reference crawler
+
+# Utilities
+pydantic         # Great for data validation alongside SQLAlchemy
+python-dotenv    # To manage environment variables (DB URLs, etc.)
