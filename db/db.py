@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from base import Base
+from db.base import Base
 from settings import settings_obj
 
 engine: AsyncEngine = create_async_engine(

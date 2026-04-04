@@ -32,8 +32,8 @@ from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from db import async_session_maker, create_all_tables
-from models import BIDSDataset, BIDSObject
+from db.db import async_session_maker, create_all_tables
+from db.models import BIDSDataset, BIDSObject
 from rules import DEFAULT_BIDS_RULESET, BIDSRuleSet, RuleResult
 
 log = logging.getLogger(__name__)
@@ -310,6 +310,7 @@ def _build_object_values(dataset: BIDSDataset, bids_file) -> dict:
         other_entities=other_entities,
         filename=bids_file.filename,
         class_=_choose_class(extension),
+        is_remote=False,
     )
 
 
@@ -389,6 +390,7 @@ async def _flush_objects(session, batch: list[dict]) -> None:
                 "extension":      pg_insert(BIDSObject).excluded.extension,
                 "other_entities": pg_insert(BIDSObject).excluded.other_entities,
                 "class_":         pg_insert(BIDSObject).excluded.class_,
+                "is_remote":      pg_insert(BIDSObject).excluded.is_remote,
             },
         )
     )
@@ -397,17 +399,50 @@ async def _flush_objects(session, batch: list[dict]) -> None:
 
 # ─── Step 4: Background BIDS validation ───────────────────────────────────────
 
+def _validator_command(path: Path) -> list[str]:
+    """
+    Build the bids-validator command appropriate for the current environment.
+
+    Inside Docker (BIDS_DATA_PATH is set):
+        The data is mounted at /data in both the bids-sql and bids-validator
+        containers, so we invoke it via `docker compose run` against the
+        /data path.  The bids-validator sidecar uses the pre-built official
+        image — no npm install needed.
+
+    Outside Docker (local dev, bids-validator on PATH):
+        Fall back to calling the binary directly.
+    """
+    import os
+    if os.getenv("BIDS_VALIDATOR_URL"):
+        # Running inside compose: delegate to the bids-validator sidecar.
+        # Map the host path back to its /data mount point inside the container.
+        data_root = Path(os.getenv("BIDS_DATA_PATH", "/data")).resolve()
+        try:
+            rel = path.resolve().relative_to(data_root.resolve())
+            container_path = Path("/data") / rel
+        except ValueError:
+            container_path = path  # path is already absolute inside container
+        return [
+            "docker", "compose", "run", "--rm", "--no-deps",
+            "bids-validator", str(container_path), "--json",
+        ]
+    return ["bids-validator", str(path), "--json"]
+
+
 async def launch_validator(path: Path) -> asyncio.subprocess.Process:
     """
-    Start `bids-validator <path> --json` as a non-blocking subprocess.
+    Start bids-validator as a non-blocking subprocess.
+
+    In Docker: delegates to the bids-validator sidecar via docker compose run.
+    Locally: calls the bids-validator binary directly (must be on PATH).
 
     All datasets are launched before any result is awaited so validation
     runs in parallel across all discovered datasets.
-    Requires: npm install -g bids-validator
     """
-    log.info("  [→] bids-validator started for %s", path.name)
+    cmd = _validator_command(path)
+    log.info("  [→] bids-validator started for %s  (%s)", path.name, " ".join(cmd[:4]))
     return await asyncio.create_subprocess_exec(
-        "bids-validator", str(path), "--json",
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

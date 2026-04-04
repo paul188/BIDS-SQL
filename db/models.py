@@ -10,7 +10,7 @@ from sqlalchemy import DateTime, FetchedValue, ForeignKey, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from upath import UPath
 
-from base import Base
+from db.base import Base
 from utils import BIDSMetadata
 
 
@@ -54,6 +54,14 @@ class BIDSDataset(Base):
         back_populates="parent",
         foreign_keys="[BIDSDataset.parent_id]",
     )
+
+    # Source provenance — how this dataset was ingested
+    # "local" = from local filesystem, "openneuro" = S3 ghost, "datalad" = datalad clone
+    source_type: Mapped[str] = mapped_column(String(20), default="local", index=True)
+    # OpenNeuro accession ID (ds000001) or equivalent dataset identifier
+    accession_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    # Base S3 URI or dataset URL (e.g. s3://openneuro.org/ds000001 or datalad repo URL)
+    remote_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     # Validation results — populated after the background bids-validator run
     # (NOT the discovery rules, which are intentionally lax)
@@ -116,6 +124,12 @@ class BIDSObject(Base):
     # in the Alembic migration to enable fast key/value lookups inside it).
     other_entities: Mapped[Dict] = mapped_column(JSON, default=dict)
 
+    # ── Remote flag ───────────────────────────────────────────────────────────
+    # True for ghost-indexed files whose content was never downloaded locally.
+    # The file's S3/HTTP URL can be reconstructed as:
+    #   dataset.remote_url + "/" + path  (for openneuro/datalad sources)
+    is_remote: Mapped[bool] = mapped_column(default=False, index=True)
+
     # ── Dataset link ─────────────────────────────────────────────────────────
     dataset_id: Mapped[UUID] = mapped_column(ForeignKey('bids_datasets.id'), index=True)
     dataset: Mapped["BIDSDataset"] = relationship(back_populates="objects")
@@ -138,28 +152,27 @@ class BIDSObject(Base):
         server_default=FetchedValue(),  # computed by a SQL trigger/migration
     )
 
-    # ── Metadata access (Fix 3) ───────────────────────────────────────────────
-
-    @property
-    def metadata(self) -> BIDSMetadata:
+    def get_metadata(self) -> BIDSMetadata:
         """
-        Return all secondary metadata as a BIDSMetadata dict.
+        Return merged sidecar content as a BIDSMetadata dict (pybids-compatible).
 
-        BIDSMetadata is a dict subclass that raises descriptive KeyErrors
-        including the source file path, which helps debugging missing fields.
+        Reads from `other_entities`, which holds the resolved sidecar inheritance
+        chain merged at index time. BIDSMetadata is a dict subclass that raises
+        descriptive KeyErrors with the source path, useful for debugging.
+
+        Named `get_metadata()` rather than a `metadata` property to avoid
+        shadowing SQLAlchemy's `Base.metadata` (the MetaData registry object).
+        A `metadata` property descriptor on any mapped class replaces the
+        inherited class attribute that SQLAlchemy uses to build the Table,
+        causing an AttributeError at import time.
         """
         md = BIDSMetadata(self.path)
-        md.update(self.other_entities or {})  # was: self._metadata_blob (never defined)
+        md.update(self.other_entities or {})
         return md
 
-    @metadata.setter
-    def metadata(self, value: Dict) -> None:
-        """Persist metadata by writing it into the `other_entities` column."""
+    def set_sidecar(self, value: Dict) -> None:
+        """Overwrite the sidecar store (other_entities) from a dict."""
         self.other_entities = dict(value)
-
-    def get_metadata(self) -> BIDSMetadata:
-        """PyBIDS-compatible access — delegates to the `metadata` property."""
-        return self.metadata
 
 
 class BIDSFile(BIDSObject):

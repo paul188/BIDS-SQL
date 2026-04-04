@@ -1,22 +1,26 @@
 # Database & ORM
 sqlalchemy>=2.0.0
-alembic          # For database migrations
+asyncpg           # Async PostgreSQL driver (required for SQLAlchemy async)
+alembic           # Database migrations
 
 # Filesystem & Paths
 universal_pathlib>=0.2.0
-fsspec           # Required by universal_pathlib for cloud/remote support
-s3fs             # Optional: Add if you plan to use Amazon S3
-paramiko         # Optional: Add if you plan to use SFTP/SSH paths
+fsspec            # Required by universal_pathlib for cloud/remote support
+s3fs              # S3 filesystem support (used by universal_pathlib + boto3)
 
 # Neuroimaging & Data Science
-nibabel          # For BIDSImageFile (NIfTI handling)
-pandas           # For BIDSDataFile (TSV/CSV handling)
+nibabel           # BIDSImageFile: NIfTI handling
+pandas            # BIDSDataFile: TSV/CSV handling
 numpy
 
 # BIDS Specific
-bidsschematools  # To interact with official BIDS rules
-pybids           # For compatibility or as a reference crawler
+bidsschematools    # Official BIDS schema rules
+pybids            # Battle-tested BIDS entity extraction and sidecar resolution
 
-# Utilities
-pydantic         # Great for data validation alongside SQLAlchemy
-python-dotenv    # To manage environment variables (DB URLs, etc.)
+# Remote ingesters
+boto3             # OpenNeuro S3 ghost indexer (anonymous access, no credentials needed)
+datalad           # DataLad ghost indexer (optional — requires git-annex on PATH)
+
+# Configuration
+pydantic-settings # settings.py BaseSettings with env-file support
+python-dotenv     # .env file loading

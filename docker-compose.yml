@@ -21,18 +21,10 @@ services:
       - bids-sql-network
 
   # ── BIDS-SQL CLI ─────────────────────────────────────────────────────────────
-  # Usage examples:
-  #
-  #   Index a local dataset folder and run bids-validator:
-  #     docker compose run --rm bids-sql /data
-  #
-  #   Index without validation (faster):
-  #     docker compose run --rm bids-sql /data --no-validate
-  #
-  #   Print the active discovery rules:
-  #     docker compose run --rm bids-sql --rules
-  #
-  # BIDS_DATA_PATH in .env should be the host path to your BIDS data root.
+  # Usage:
+  #   docker compose run --rm bids-sql /data              # index + validate
+  #   docker compose run --rm bids-sql /data --no-validate # index only (fast)
+  #   docker compose run --rm bids-sql --rules             # print discovery rules
   bids-sql:
     build:
       context: .
@@ -41,18 +33,35 @@ services:
     container_name: bids_sql_cli
     env_file: .env
     environment:
-      # Override DB host to the compose service name so the CLI container
-      # reaches postgres over the internal Docker network (not localhost).
+      # Override host + port for internal container-to-container traffic.
+      # Postgres always listens on 5432 inside Docker regardless of the
+      # host-side exposed port (5429 in .env — that stays unchanged).
       METADATA_DB_HOST: postgres
+      METADATA_DB_PORT: 5432
+      # Tell the pipeline where to find the validator sidecar
+      BIDS_VALIDATOR_URL: http://bids-validator:8080
     volumes:
-      # Mount BIDS data read-only — the pipeline only reads files, never writes
       - ${BIDS_DATA_PATH:-./data}:/data:ro
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - bids-sql-network
-    # No `restart` — this is a one-shot CLI tool, not a daemon
+
+  # ── BIDS Validator sidecar ────────────────────────────────────────────────────
+  # Official image — no npm install needed, pulls a pre-built binary.
+  # The CLI calls `bids-validator /data --json` inside this container via
+  # `docker compose run --rm bids-validator /data` when validation is requested.
+  # Keeping it as a separate service means the bids-sql image stays fast to build
+  # and the validator can be updated independently.
+  bids-validator:
+    image: bids/validator
+    container_name: bids_sql_validator
+    volumes:
+      - ${BIDS_DATA_PATH:-./data}:/data:ro
+    networks:
+      - bids-sql-network
+    # No ports, no restart — invoked on demand via `docker compose run`
 
 networks:
   bids-sql-network:
