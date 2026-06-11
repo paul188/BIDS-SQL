@@ -6,7 +6,8 @@ from functools import cached_property
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, FetchedValue, ForeignKey, Integer, JSON, String
+from sqlalchemy import DateTime, FetchedValue, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from upath import UPath
 
@@ -63,6 +64,14 @@ class BIDSDataset(Base):
     # Base S3 URI or dataset URL (e.g. s3://openneuro.org/ds000001 or datalad repo URL)
     remote_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # Rich metadata from dataset_description.json
+    authors: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
+    license: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    doi: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    paper_references: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
+    funding: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
+    description_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Validation results — populated after the background bids-validator run
     # (NOT the discovery rules, which are intentionally lax)
     validation_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default=None)
@@ -73,6 +82,12 @@ class BIDSDataset(Base):
 
     # One Dataset → Many BIDSObjects
     objects: Mapped[List["BIDSObject"]] = relationship(
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+    )
+
+    # One Dataset → Many BIDSParticipants (from participants.tsv)
+    participants: Mapped[List["BIDSParticipant"]] = relationship(
         back_populates="dataset",
         cascade="all, delete-orphan",
     )
@@ -328,3 +343,41 @@ class ObjectAssociation(Base):
 
     def __repr__(self) -> str:
         return f"<ObjectAssociation {self.src_id} --[{self.kind}]--> {self.dst_id}>"
+
+
+class BIDSParticipant(Base):
+    """
+    One row per participant entry in participants.tsv.
+
+    BIDS mandates a `participant_id` column (e.g. "sub-01").
+    Age, sex, and diagnosis/group are optional but extremely common and
+    are promoted to indexed first-class columns for fast SQL filtering.
+    All remaining columns land in `extra` (JSON) for schema flexibility.
+    """
+    __tablename__ = "bids_participants"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    dataset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bids_datasets.id", ondelete="CASCADE"), index=True
+    )
+    participant_id: Mapped[str] = mapped_column(String(50), index=True)   # "sub-01"
+    age: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sex: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, index=True)
+    handedness: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    # Diagnosis or group label (e.g. "Alzheimer's Disease", "HC", "PD").
+    # Stored lower-cased for case-insensitive matching.
+    diagnosis: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, index=True)
+    # All other columns from participants.tsv
+    extra: Mapped[Optional[Dict]] = mapped_column(JSON, nullable=True)
+
+    dataset: Mapped["BIDSDataset"] = relationship(back_populates="participants")
+
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "participant_id", name="uq_participant_per_dataset"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<BIDSParticipant({self.participant_id}, "
+            f"diagnosis={self.diagnosis!r}, age={self.age})>"
+        )

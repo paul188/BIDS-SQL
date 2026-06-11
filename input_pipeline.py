@@ -33,7 +33,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.db import async_session_maker, create_all_tables
-from db.models import BIDSDataset, BIDSObject
+from db.models import BIDSDataset, BIDSObject, BIDSParticipant
 from rules import DEFAULT_BIDS_RULESET, BIDSRuleSet, RuleResult
 
 log = logging.getLogger(__name__)
@@ -72,7 +72,12 @@ def _get_bids_layout(path: Path):
             "pybids is required for file-level indexing.\n"
             "  Install with: pip install pybids"
         )
-    return BIDSLayout(str(path), validate=False, derivatives=False, database_path=None)
+    try:
+        return BIDSLayout(str(path), validate=False, derivatives=False, database_path=None)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(
+            f"pybids failed to index '{path}': {exc}"
+        ) from exc
 
 
 # ─── Step 1 + 2: Discovery ────────────────────────────────────────────────────
@@ -511,6 +516,112 @@ async def store_validation_result(session, dataset: BIDSDataset, result: dict) -
              dataset.name, result.get("status"))
 
 
+# ─── Step 3c: participants.tsv indexing ──────────────────────────────────────
+
+# Known column names and how they map to BIDSParticipant columns
+_PARTICIPANT_COLUMN_MAP = {
+    "participant_id": "participant_id",
+    "age": "age",
+    "sex": "sex",
+    "gender": "sex",           # common alias
+    "handedness": "handedness",
+    "diagnosis": "diagnosis",
+    "group": "diagnosis",      # common alias
+    "pathology": "diagnosis",  # common alias
+}
+
+
+async def index_participants_tsv(session, dataset: BIDSDataset, dataset_path: Path) -> int:
+    """
+    Parse participants.tsv from a dataset root and upsert rows into bids_participants.
+
+    Returns the number of rows upserted.
+    """
+    tsv_path = dataset_path / "participants.tsv"
+    if not tsv_path.exists():
+        return 0
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(tsv_path, sep="\t", na_values="n/a", dtype=str)
+    except Exception as exc:
+        log.warning("  [participants] Could not read %s: %s", tsv_path, exc)
+        return 0
+
+    if "participant_id" not in df.columns:
+        log.warning("  [participants] %s has no participant_id column — skipped", tsv_path)
+        return 0
+
+    rows: list[dict] = []
+    known_cols = set(_PARTICIPANT_COLUMN_MAP.keys())
+    for _, row in df.iterrows():
+        participant_id = str(row["participant_id"]).strip()
+        if not participant_id:
+            continue
+
+        def _clean(val) -> str | None:
+            if val is None:
+                return None
+            s = str(val).strip()
+            return None if s.lower() in ("n/a", "nan", "", "none") else s
+
+        age_raw = _clean(row.get("age"))
+        age: float | None = None
+        try:
+            age = float(age_raw) if age_raw is not None else None
+        except ValueError:
+            pass
+
+        sex = _clean(row.get("sex") or row.get("gender"))
+        handedness = _clean(row.get("handedness"))
+        diagnosis_raw = _clean(
+            row.get("diagnosis") or row.get("group") or row.get("pathology")
+        )
+        diagnosis = diagnosis_raw.lower() if diagnosis_raw else None
+
+        extra_cols = {
+            col: _clean(row.get(col))
+            for col in df.columns
+            if col not in known_cols
+        }
+        extra = {k: v for k, v in extra_cols.items() if v is not None} or None
+
+        rows.append(dict(
+            id=uuid4(),
+            dataset_id=dataset.id,
+            participant_id=participant_id,
+            age=age,
+            sex=sex,
+            handedness=handedness,
+            diagnosis=diagnosis,
+            extra=extra,
+        ))
+
+    if not rows:
+        return 0
+
+    stmt = (
+        pg_insert(BIDSParticipant)
+        .values(rows)
+        .on_conflict_do_update(
+            constraint="uq_participant_per_dataset",
+            set_={
+                "age":        pg_insert(BIDSParticipant).excluded.age,
+                "sex":        pg_insert(BIDSParticipant).excluded.sex,
+                "handedness": pg_insert(BIDSParticipant).excluded.handedness,
+                "diagnosis":  pg_insert(BIDSParticipant).excluded.diagnosis,
+                "extra":      pg_insert(BIDSParticipant).excluded.extra,
+            },
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
+    log.info(
+        "  [participants] Upserted %d row(s) from %s", len(rows), tsv_path.name
+    )
+    return len(rows)
+
+
 # ─── Main pipeline ─────────────────────────────────────────────────────────────
 
 async def run_pipeline(
@@ -563,6 +674,12 @@ async def run_pipeline(
     async with async_session_maker() as session:
         for path, dataset in indexed:
             await index_dataset_files(session, dataset, path)
+
+    # ── Step 3c: participants.tsv ─────────────────────────────────────────────
+    log.info("=== Step 3c: Indexing participants.tsv ===")
+    async with async_session_maker() as session:
+        for path, dataset in indexed:
+            await index_participants_tsv(session, dataset, path)
 
     if skip_validation:
         log.info("Skipping validation (--no-validate passed).")
