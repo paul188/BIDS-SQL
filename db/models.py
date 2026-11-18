@@ -32,9 +32,9 @@ class BIDSDataset(Base):
     description: Mapped[Dict] = mapped_column(JSON, nullable=False)
 
     # Metadata derived from description (for fast filtering)
-    name: Mapped[str] = mapped_column(String(100), index=True)
-    bids_version: Mapped[str] = mapped_column(String(20))
-    dataset_type: Mapped[str] = mapped_column(String(20), default="raw", index=True)  # "raw" | "derivative"
+    name: Mapped[str] = mapped_column(String(300), index=True)
+    bids_version: Mapped[str] = mapped_column(String)
+    dataset_type: Mapped[str] = mapped_column(String(50), default="raw", index=True)  # "raw" | "derivative"
 
     # Self-referential parent/derivative hierarchy
     # A derivative dataset (e.g. derivatives/fmriprep/) points back to the
@@ -58,7 +58,7 @@ class BIDSDataset(Base):
 
     # Source provenance — how this dataset was ingested
     # "local" = from local filesystem, "openneuro" = S3 ghost, "datalad" = datalad clone
-    source_type: Mapped[str] = mapped_column(String(20), default="local", index=True)
+    source_type: Mapped[str] = mapped_column(String(50), default="local", index=True)
     # OpenNeuro accession ID (ds000001) or equivalent dataset identifier
     accession_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
     # Base S3 URI or dataset URL (e.g. s3://openneuro.org/ds000001 or datalad repo URL)
@@ -74,7 +74,7 @@ class BIDSDataset(Base):
 
     # Validation results — populated after the background bids-validator run
     # (NOT the discovery rules, which are intentionally lax)
-    validation_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default=None)
+    validation_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default=None)
     validation_errors: Mapped[Optional[Dict]] = mapped_column(JSON, nullable=True, default=None)
     validation_warnings: Mapped[Optional[Dict]] = mapped_column(JSON, nullable=True, default=None)
     validator_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default=None)
@@ -130,8 +130,8 @@ class BIDSObject(Base):
     task: Mapped[Optional[str]] = mapped_column(String, index=True)
     run: Mapped[Optional[int]] = mapped_column(Integer, index=True)
     suffix: Mapped[str] = mapped_column(String, index=True)
-    datatype: Mapped[Optional[str]] = mapped_column(String(64), index=True)   # "func", "anat", "dwi", …
-    extension: Mapped[Optional[str]] = mapped_column(String(32), index=True)  # ".nii.gz", ".json", …
+    datatype: Mapped[Optional[str]] = mapped_column(String, index=True)   # "func", "anat", "dwi", …
+    extension: Mapped[Optional[str]] = mapped_column(String, index=True)  # ".nii.gz", ".json", …
 
     # ── Chaos bucket — everything else ───────────────────────────────────────
     # Secondary entities: echo, acq, ce, dir, space, res, hemi, …
@@ -362,8 +362,8 @@ class BIDSParticipant(Base):
     )
     participant_id: Mapped[str] = mapped_column(String(50), index=True)   # "sub-01"
     age: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    sex: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, index=True)
-    handedness: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    sex: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    handedness: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     # Diagnosis or group label (e.g. "Alzheimer's Disease", "HC", "PD").
     # Stored lower-cased for case-insensitive matching.
     diagnosis: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, index=True)

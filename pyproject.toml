@@ -15,10 +15,14 @@ dependencies = [
     "nibabel",
     "pandas",
     "numpy",
+    "sentence-transformers",
     "pybids",
     "pydantic-settings",
     "python-dotenv",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 # Expose top-level modules AND the db sub-package.
 # With `pip install -e .` the BIDS-SQL/ dir is added to sys.path, so all
@@ -30,3 +34,7 @@ py-modules = ["input_pipeline", "rules", "settings", "utils", "cli"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["db*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]

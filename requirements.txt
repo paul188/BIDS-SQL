@@ -12,6 +12,7 @@ s3fs              # S3 filesystem support (used by universal_pathlib + boto3)
 nibabel           # BIDSImageFile: NIfTI handling
 pandas            # BIDSDataFile: TSV/CSV handling
 numpy
+sentence-transformers  # Metadata index embeddings
 
 # BIDS Specific
 bidsschematools    # Official BIDS schema rules

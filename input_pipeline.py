@@ -67,17 +67,85 @@ def _get_bids_layout(path: Path):
     """
     try:
         from bids import BIDSLayout
+        from bids.exceptions import BIDSConflictingValuesError
     except ImportError:
         raise ImportError(
             "pybids is required for file-level indexing.\n"
             "  Install with: pip install pybids"
         )
+    import json as _json
+    import logging
+    _log = logging.getLogger(__name__)
+
+    _BIDS_ENTITIES = frozenset({
+        # BIDS abbreviations (used in filenames and some sidecars)
+        "sub", "ses", "task", "run", "acq", "ce", "dir", "echo", "flip",
+        "hemi", "inv", "mt", "part", "proc", "recording", "res", "sample",
+        "space", "split", "trc", "stain", "chunk", "density", "atlas",
+        "desc", "label", "from", "to", "mod", "seg", "datatype",
+        # Full entity names (used in some sidecar column-description JSONs)
+        "subject", "session", "acquisition", "direction", "reconstruction",
+        "hemisphere", "resolution", "description",
+    })
+
+    def _sanitize_sidecars(root: Path) -> int:
+        """Rewrite malformed/non-object JSON sidecars and clean invalid entities."""
+        n = 0
+        for json_file in root.rglob("*.json"):
+            raw = json_file.read_bytes()
+            try:
+                data = _json.loads(raw)
+            except Exception:
+                # Empty or malformed JSON — replace with empty object so
+                # pybids can parse it without throwing JSONDecodeError.
+                _log.warning("  replacing malformed/empty JSON with {}: %s", json_file)
+                json_file.write_text("{}")
+                n += 1
+                continue
+
+            # pybids expects JSON sidecars to deserialize to objects. Valid JSON
+            # arrays/scalars still break metadata merges, so stub them out.
+            if not isinstance(data, dict):
+                _log.warning("  replacing non-object JSON with {}: %s", json_file)
+                json_file.write_text("{}")
+                n += 1
+                continue
+
+            dirty = any(
+                k in _BIDS_ENTITIES and not isinstance(v, str)
+                for k, v in data.items()
+            )
+            if dirty:
+                cleaned = {
+                    k: v for k, v in data.items()
+                    if not (k in _BIDS_ENTITIES and not isinstance(v, str))
+                }
+                _log.warning("  sanitized sidecar: %s", json_file)
+                json_file.write_text(_json.dumps(cleaned))
+                n += 1
+        return n
+
     try:
-        return BIDSLayout(str(path), validate=False, derivatives=False, database_path=None)
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError(
-            f"pybids failed to index '{path}': {exc}"
-        ) from exc
+        layout = BIDSLayout(str(path), validate=False, derivatives=False, database_path=None)
+        # Eagerly trigger file-entity loading so any metadata merge issues
+        # surface here instead of later in the indexing pass.
+        layout.get()
+        return layout
+    except (BIDSConflictingValuesError, ValueError, OSError, TypeError) as exc:
+        _log.warning(
+            "pybids error for %s: %s — sanitizing sidecars and retrying",
+            path, exc,
+        )
+        n = _sanitize_sidecars(path)
+        _log.warning("  sanitized %d sidecar(s), retrying BIDSLayout …", n)
+        try:
+            layout = BIDSLayout(str(path), validate=False, derivatives=False, database_path=None)
+            layout.get()
+            return layout
+        except (BIDSConflictingValuesError, ValueError, OSError, TypeError) as exc2:
+            raise RuntimeError(
+                f"pybids error persists after sanitizing {n} sidecar(s): {exc2}"
+            ) from None
 
 
 # ─── Step 1 + 2: Discovery ────────────────────────────────────────────────────
@@ -225,8 +293,8 @@ async def upsert_dataset(
             id=uuid4(),
             root_path=str(path.resolve()),
             description=description,
-            name=description.get("Name", path.name),
-            bids_version=description.get("BIDSVersion", "unknown"),
+            name=description.get("Name", path.name)[:300],
+            bids_version=description.get("BIDSVersion", "unknown")[:200],
             dataset_type=dataset_type,
             parent_id=parent_id,
         )
@@ -276,16 +344,36 @@ def _build_object_values(dataset: BIDSDataset, bids_file) -> dict:
     """
     # ── pybids read calls ────────────────────────────────────────────────────
     entities = bids_file.get_entities()           # {name: value, …}
-    metadata = dict(bids_file.get_metadata())     # merged JSON sidecars
+    try:
+        metadata = dict(bids_file.get_metadata())     # merged JSON sidecars
+    except (TypeError, ValueError):
+        metadata = {}
 
     # ── First-class columns ──────────────────────────────────────────────────
     subject_label = entities.get("subject")       # "01"  (padded str)
     session_label = entities.get("session")
 
+    def _safe_int32(value) -> int | None:
+        """Parse integer-like entity labels, returning None when out of int32 range."""
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (ValueError, OverflowError, TypeError):
+            return None
+        if parsed < -2147483648 or parsed > 2147483647:
+            return None
+        return parsed
+
     run_raw = entities.get("run")
-    run_index = int(run_raw) if run_raw is not None else None
+    run_index = _safe_int32(run_raw)
 
     extension = entities.get("extension")
+    if extension and len(extension) > 64:
+        # pybids sometimes returns the full dotted suffix of non-BIDS filenames
+        # (e.g. ".724560000_4294967295.nii"). Fall back to just the last component.
+        last = "." + extension.rsplit(".", 1)[-1] if "." in extension else extension
+        extension = last if len(last) <= 64 else last[:64]
 
     # ── Overflow: secondary entities + sidecar metadata ──────────────────────
     # Secondary entities (echo, acq, ce, dir, space, …) that didn't get a
@@ -298,15 +386,30 @@ def _build_object_values(dataset: BIDSDataset, bids_file) -> dict:
         if k not in _FIRST_CLASS_ENTITIES
     }
     other_entities = {**overflow_entities, **metadata}
+    # Recursively sanitize non-JSON-serialisable float values (NaN, Inf)
+    # that PostgreSQL rejects as invalid JSON tokens. NaN can appear nested
+    # inside dicts or lists inside sidecar metadata values.
+    import math as _math
+
+    def _sanitize_json(obj):
+        if isinstance(obj, float):
+            return None if not _math.isfinite(obj) else obj
+        if isinstance(obj, dict):
+            return {k: _sanitize_json(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize_json(v) for v in obj]
+        return obj
+
+    other_entities = _sanitize_json(other_entities)
 
     return dict(
         id=uuid4(),
         dataset_id=dataset.id,
         path=bids_file.path,
         subject=subject_label,
-        subject_index=int(subject_label) if subject_label and subject_label.isdigit() else None,
+        subject_index=_safe_int32(subject_label) if subject_label and str(subject_label).isdigit() else None,
         session=session_label,
-        session_index=int(session_label) if session_label and session_label.isdigit() else None,
+        session_index=_safe_int32(session_label) if session_label and str(session_label).isdigit() else None,
         task=entities.get("task"),
         run=run_index,
         suffix=entities.get("suffix", ""),
@@ -572,12 +675,12 @@ async def index_participants_tsv(session, dataset: BIDSDataset, dataset_path: Pa
         except ValueError:
             pass
 
-        sex = _clean(row.get("sex") or row.get("gender"))
-        handedness = _clean(row.get("handedness"))
+        sex = (_clean(row.get("sex") or row.get("gender")) or "")[:50] or None
+        handedness = (_clean(row.get("handedness")) or "")[:50] or None
         diagnosis_raw = _clean(
             row.get("diagnosis") or row.get("group") or row.get("pathology")
         )
-        diagnosis = diagnosis_raw.lower() if diagnosis_raw else None
+        diagnosis = diagnosis_raw.lower()[:200] if diagnosis_raw else None
 
         extra_cols = {
             col: _clean(row.get(col))
@@ -599,6 +702,17 @@ async def index_participants_tsv(session, dataset: BIDSDataset, dataset_path: Pa
 
     if not rows:
         return 0
+
+    # Deduplicate on (dataset_id, participant_id) — some TSV files have duplicate
+    # participant_id rows which cause CardinalityViolationError in ON CONFLICT DO UPDATE.
+    seen: set[tuple] = set()
+    deduped = []
+    for r in rows:
+        key = (r["dataset_id"], r["participant_id"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+    rows = deduped
 
     stmt = (
         pg_insert(BIDSParticipant)
